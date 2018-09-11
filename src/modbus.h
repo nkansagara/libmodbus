@@ -9,52 +9,52 @@
 
 /* Add this for macros that defined unix flavor */
 #if (defined(__unix__) || defined(unix)) && !defined(USG)
-#include <sys/param.h>
+#    include <sys/param.h>
 #endif
 
 #ifndef _MSC_VER
-#include <stdint.h>
+#    include <stdint.h>
 #else
-#include "stdint.h"
+#    include "stdint.h"
 #endif
 
 #include "modbus-version.h"
 
 #if defined(_MSC_VER)
-# if defined(DLLBUILD)
+#    if defined(DLLBUILD)
 /* define DLLBUILD when building the DLL */
-#  define MODBUS_API __declspec(dllexport)
-# else
-#  define MODBUS_API __declspec(dllimport)
-# endif
+#        define MODBUS_API __declspec(dllexport)
+#    else
+#        define MODBUS_API __declspec(dllimport)
+#    endif
 #else
-# define MODBUS_API
+#    define MODBUS_API
 #endif
 
-#ifdef  __cplusplus
-# define MODBUS_BEGIN_DECLS  extern "C" {
-# define MODBUS_END_DECLS    }
+#ifdef __cplusplus
+#    define MODBUS_BEGIN_DECLS extern "C" {
+#    define MODBUS_END_DECLS }
 #else
-# define MODBUS_BEGIN_DECLS
-# define MODBUS_END_DECLS
+#    define MODBUS_BEGIN_DECLS
+#    define MODBUS_END_DECLS
 #endif
 
 MODBUS_BEGIN_DECLS
 
 #ifndef FALSE
-#define FALSE 0
+#    define FALSE 0
 #endif
 
 #ifndef TRUE
-#define TRUE 1
+#    define TRUE 1
 #endif
 
 #ifndef OFF
-#define OFF 0
+#    define OFF 0
 #endif
 
 #ifndef ON
-#define ON 1
+#    define ON 1
 #endif
 
 /* Modbus function codes */
@@ -176,8 +176,8 @@ typedef enum
     MODBUS_ERROR_RECOVERY_PROTOCOL      = (1<<2)
 } modbus_error_recovery_mode;
 
-MODBUS_API int modbus_set_slave(modbus_t* ctx, int slave);
-MODBUS_API int modbus_get_slave(modbus_t* ctx);
+MODBUS_API int modbus_set_slave(modbus_t *ctx, int slave);
+MODBUS_API int modbus_get_slave(modbus_t *ctx);
 MODBUS_API int modbus_set_error_recovery(modbus_t *ctx, modbus_error_recovery_mode error_recovery);
 MODBUS_API int modbus_set_socket(modbus_t *ctx, int s);
 MODBUS_API int modbus_get_socket(modbus_t *ctx);
@@ -217,13 +217,13 @@ MODBUS_API int modbus_write_and_read_registers(modbus_t *ctx, int write_addr, in
                                                uint16_t *dest);
 MODBUS_API int modbus_report_slave_id(modbus_t *ctx, int max_dest, uint8_t *dest);
 
-MODBUS_API modbus_mapping_t* modbus_mapping_new_start_address(
+MODBUS_API modbus_mapping_t *modbus_mapping_new_start_address(
     unsigned int start_bits, unsigned int nb_bits,
     unsigned int start_input_bits, unsigned int nb_input_bits,
     unsigned int start_registers, unsigned int nb_registers,
     unsigned int start_input_registers, unsigned int nb_input_registers);
 
-MODBUS_API modbus_mapping_t* modbus_mapping_new(int nb_bits, int nb_input_bits,
+MODBUS_API modbus_mapping_t *modbus_mapping_new(int nb_bits, int nb_input_bits,
                                                 int nb_registers, int nb_input_registers);
 MODBUS_API void modbus_mapping_free(modbus_mapping_t *mb_mapping);
 
@@ -275,7 +275,7 @@ MODBUS_API int modbus_reply_exception(modbus_t *ctx, const uint8_t *req,
 
 MODBUS_API void modbus_set_bits_from_byte(uint8_t *dest, int idx, const uint8_t value);
 MODBUS_API void modbus_set_bits_from_bytes(uint8_t *dest, int idx, unsigned int nb_bits,
-                                       const uint8_t *tab_byte);
+                                           const uint8_t *tab_byte);
 MODBUS_API uint8_t modbus_get_byte_from_bits(const uint8_t *src, int idx, unsigned int nb_bits);
 MODBUS_API float modbus_get_float(const uint16_t *src);
 MODBUS_API float modbus_get_float_abcd(const uint16_t *src);
@@ -294,4 +294,4 @@ MODBUS_API void modbus_set_float_cdab(float f, uint16_t *dest);
 
 MODBUS_END_DECLS
 
-#endif  /* MODBUS_H */
+#endif /* MODBUS_H */
