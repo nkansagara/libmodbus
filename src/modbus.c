@@ -441,6 +441,7 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
                     step = _STEP_META;
                     break;
                 } /* else switches straight to the next step */
+                  // fall-through
             case _STEP_META:
                 length_to_read = compute_data_length_after_meta(
                     ctx, msg, msg_type);
