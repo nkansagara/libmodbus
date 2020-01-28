@@ -106,7 +106,7 @@ int modbus_reply_callback(modbus_t *ctx, const uint8_t *req, int req_length)
 {
     int offset;
     int slave;
-    int function;
+    uint8_t function;
     uint16_t address;
     uint8_t rsp[MAX_MESSAGE_LENGTH];
     int rsp_length = 0;
@@ -121,6 +121,9 @@ int modbus_reply_callback(modbus_t *ctx, const uint8_t *req, int req_length)
     slave = req[offset - 1];
     function = req[offset];
     address = (req[offset + 1] << 8) + req[offset + 2];
+
+    const char *function_name =
+        function < sizeof(names) / sizeof(*names) ? names[function] : "unknown";
 
     /* special RTU-cases error checking */
     if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_RTU) {
@@ -233,7 +236,7 @@ int modbus_reply_callback(modbus_t *ctx, const uint8_t *req, int req_length)
 
     if (ctx->debug)
         fprintf(stderr, "function %s (%x), %d, %d, max: %d, resp: %d\n",
-                names[function], function, address, nb, max_nb, rsp_length);
+                function_name, function, address, nb, max_nb, rsp_length);
 
     /* we already have a response - we are done */
     if (rsp_length > 0)
@@ -252,7 +255,7 @@ int modbus_reply_callback(modbus_t *ctx, const uint8_t *req, int req_length)
         rsp_length = response_exception(
             ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, rsp, TRUE,
             "Illegal nb of values %d in %s (max %d)\n",
-            nb, names[function], max_nb);
+            nb, function_name, max_nb);
         goto send_response;
     }
 
@@ -261,14 +264,14 @@ int modbus_reply_callback(modbus_t *ctx, const uint8_t *req, int req_length)
             ctx, &sft,
             MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS, rsp, FALSE,
             "Illegal data address 0x%0X in %s\n",
-            address, names[function]);
+            address, function_name);
         goto send_response;
     } else if (verified == EMBXILFUN) { /* verify found an invalid function */
         rsp_length = response_exception(
             ctx, &sft,
             MODBUS_EXCEPTION_ILLEGAL_FUNCTION, rsp, FALSE,
             "Slave/client does not accept Modbus function code: 0x%0X (%s)\n",
-            function, names[function]);
+            function, function_name);
         goto send_response;
     } else if (verified != 0) { /* another error has occured */
         errno = EINVAL;
