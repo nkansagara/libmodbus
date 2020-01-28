@@ -247,6 +247,32 @@ int modbus_reply_callback(modbus_t *ctx, const uint8_t *req, int req_length)
     if (verified == 0)
         verified = ctx->reply_cb->verify(ctx->reply_user_ctx, slave, function, address, nb);
 
+    /* check bytes-count vs. value-count in multiple-write requests) */
+    int bytes_vs_payload_size = 0;
+    int nb_payload_max = 0; /* number of bytes to be written */
+
+    switch (function) {
+    case MODBUS_FC_WRITE_MULTIPLE_COILS:
+        bytes_vs_payload_size = 1;
+        nb_payload_max = req[offset + 5] * 8;
+        break;
+
+    case MODBUS_FC_WRITE_MULTIPLE_REGISTERS:
+        bytes_vs_payload_size = 1;
+        nb_payload_max = req[offset + 5] / 2;
+        break;
+    default:
+        break;
+    }
+
+    if (bytes_vs_payload_size && nb > nb_payload_max) {
+        rsp_length = response_exception(
+            ctx, &sft, MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE, rsp, TRUE,
+            "Illegal nb of values vs. byte-count %d in %s (max %d)\n",
+            nb, function_name, nb_payload_max);
+        goto send_response;
+    }
+
     /* out of reply-buffer-range */
     if (nb < 1 || max_nb < nb) {
         /* Maybe the indication has been truncated on reading because of
