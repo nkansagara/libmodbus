@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 #ifndef _MSC_VER
 #    include <unistd.h>
 #endif
@@ -751,6 +752,600 @@ static void _modbus_tcp_free(modbus_t *ctx)
     free(ctx);
 }
 
+static unsigned int _psk_server_cb(SSL *ssl, const char *identity,
+                                   unsigned char *psk, unsigned int max_psk_len)
+{
+    long key_len = 0;
+    char *psk_key = NULL;
+    char *psk_identity = NULL;
+    modbus_tls_t *ctx_tls = NULL;
+    unsigned char *key = NULL;
+
+    ctx_tls = (modbus_tls_t *)SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl));
+    if (!ctx_tls) {
+        fprintf(stderr, "Error: ctx_tls is not valid\n");
+        goto out_err;
+    }
+
+    psk_key = ctx_tls->psk;
+    if (!psk_key) {
+        fprintf(stderr, "Error: PSK key not found\n");
+        goto out_err;
+    }
+
+    psk_identity = ctx_tls->identity;
+    if (!psk_identity) {
+        fprintf(stderr, "Error: PSK identity not found\n");
+        goto out_err;
+    }
+
+    if (identity == NULL) {
+        fprintf(stderr, "Error: Client did not send PSK identity\n");
+        goto out_err;
+    }
+
+    /* here we could lookup the given identity e.g. from a database */
+    if (strcmp(identity, psk_identity) != 0) {
+        fprintf(stderr, "Error: Client identity not what we expected\n");
+        goto out_err;
+    }
+
+	/* convert the PSK key to binary */
+	key = OPENSSL_hexstr2buf(psk_key, &key_len);
+	if (key == NULL) {
+        fprintf(stderr, "Error: Could not convert PSK key to binary\n");
+        goto out_err;
+	}
+	if (max_psk_len > INT_MAX || key_len > (int) max_psk_len) {
+		fprintf(stderr,
+				"Error: Psk buffer of callback is too small (%d) for key (%ld)\n",
+				max_psk_len, key_len);
+        goto out_err;
+	}
+
+	memcpy(psk, key, key_len);
+	if (key) OPENSSL_free(key);
+    return key_len;
+
+out_err:
+    if (key) OPENSSL_free(key);
+    return 0;
+}
+
+static unsigned int _psk_client_cb(SSL *ssl, const char *hint, char *identity,
+                                   unsigned int max_identity_len, unsigned char *psk,
+                                   unsigned int max_psk_len)
+{
+    int ret = -1;
+    long key_len = 0;
+    char *psk_key = NULL;
+    char *psk_identity = NULL;
+    modbus_tls_t *ctx_tls = NULL;
+    unsigned char *key = NULL;
+
+    ctx_tls = (modbus_tls_t *)SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl));
+    if (!ctx_tls) {
+        fprintf(stderr, "Error: ctx_tls is not valid\n");
+        goto out_err;
+    }
+
+    psk_key = ctx_tls->psk;
+    if (!psk_key) {
+        fprintf(stderr, "Error: PSK key not found\n");
+        goto out_err;
+    }
+
+    psk_identity = ctx_tls->identity;
+    if (!psk_identity) {
+        fprintf(stderr, "Error: PSK identity not found\n");
+        goto out_err;
+    }
+
+    ret = BIO_snprintf(identity, max_identity_len, "%s", psk_identity);
+    if (ret < 0 || (unsigned int)ret > max_identity_len) {
+        fprintf(stderr, "Error: PSK identity create failed\n");
+        goto out_err;
+    }
+
+	/* convert the PSK key to binary */
+	key = OPENSSL_hexstr2buf(psk_key, &key_len);
+	if (key == NULL) {
+		fprintf(stderr, "Error: Could not convert PSK key to binary\n");
+		goto out_err;
+	}
+	if (max_psk_len > INT_MAX || key_len > (long) max_psk_len) {
+		fprintf(stderr,
+				"Error: PSK buffer of callback is too small (%d) for key (%ld)\n",
+				max_psk_len, key_len);
+		goto out_err;
+	}
+
+	memcpy(psk, key, key_len);
+    if (key) OPENSSL_free(key);
+    return key_len;
+
+out_err:
+	if (key) OPENSSL_free(key);
+    return 0;
+}
+
+static int _set_ssl_map(modbus_t *ctx, SSL *ssl, int sock)
+{
+    int i;
+    modbus_tls_t *ctx_tls = (modbus_tls_t *)ctx->backend_data;
+
+    for (i = 0; i < _MODBUS_TCP_TLS_MAX_CONNECTION; i++) {
+        if (NULL == ctx_tls->ssl_pair[i].ssl) {
+            ctx_tls->ssl_pair[i].sock = sock;
+            ctx_tls->ssl_pair[i].ssl = ssl;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static SSL *_get_ssl_map(modbus_t *ctx)
+{
+    int i;
+    modbus_tls_t *ctx_tls = (modbus_tls_t *)ctx->backend_data;
+
+    for (i = 0; i < _MODBUS_TCP_TLS_MAX_CONNECTION; i++) {
+        if (ctx_tls->ssl_pair[i].sock == ctx->s) {
+            return ctx_tls->ssl_pair[i].ssl;
+        }
+    }
+
+    return NULL;
+}
+
+static void _clear_ssl_map(modbus_t *ctx)
+{
+    int i;
+    modbus_tls_t *ctx_tls = (modbus_tls_t *)ctx->backend_data;
+
+    for (i = 0; i < _MODBUS_TCP_TLS_MAX_CONNECTION; i++) {
+        if (ctx_tls->ssl_pair[i].sock == ctx->s) {
+            ctx_tls->ssl_pair[i].sock = -1;
+            ctx_tls->ssl_pair[i].ssl = NULL;
+        }
+    }
+
+    return;
+}
+
+static ssize_t _modbus_tls_send(modbus_t *ctx, const uint8_t *req, int req_length)
+{
+    int ret = -1;
+    fd_set fds;
+    struct timeval tv;
+
+    SSL *ssl = _get_ssl_map(ctx);
+    if (!ssl) {
+        if (ctx->debug) {
+            fprintf(stderr, "%s Error: ssl context is null\n", __func__);
+        }
+        return ret;
+    }
+
+    do {
+        ret = SSL_write(ssl, req, req_length);
+        if (ret <= 0) {
+            ret = SSL_get_error(ssl, ret);
+            if (ctx->debug) {
+                printf("SSL_write [%d]\n", ret);
+            }
+
+            FD_ZERO(&fds);
+            FD_SET(ctx->s, &fds);
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+
+            switch (ret) {
+            case SSL_ERROR_WANT_READ:
+                ret = select(ctx->s + 1, &fds, NULL, NULL, &tv);
+                if (ret <= 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    return -1;
+                }
+
+                ret = -1;
+                break;
+            case SSL_ERROR_WANT_WRITE:
+                ret = select(ctx->s + 1, NULL, &fds, NULL, &tv);
+                if (ret <= 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    return -1;
+                }
+
+                ret = -1;
+                break;
+            default:
+                return -1;
+            }
+        }
+    } while (ret <= 0);
+
+    return ret;
+}
+
+static ssize_t _modbus_tls_recv(modbus_t *ctx, uint8_t *rsp, int rsp_length)
+{
+    int ret = -1;
+    fd_set fds;
+    struct timeval tv;
+
+    SSL *ssl = _get_ssl_map(ctx);
+    if (!ssl) {
+        if (ctx->debug) {
+            fprintf(stderr, "%s Error: ssl context is null\n", __func__);
+        }
+        return ret;
+    }
+
+    do {
+        ret = SSL_read(ssl, rsp, rsp_length);
+        if (ret <= 0) {
+            ret = SSL_get_error(ssl, ret);
+            if (ctx->debug) {
+                printf("SSL_read [%d]\n", ret);
+            }
+
+            FD_ZERO(&fds);
+            FD_SET(ctx->s, &fds);
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+
+            switch (ret) {
+            case SSL_ERROR_WANT_READ:
+                ret = select(ctx->s + 1, &fds, NULL, NULL, &tv);
+                if (ret <= 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    return -1;
+                }
+
+                ret = -1;
+                break;
+            case SSL_ERROR_WANT_WRITE:
+                ret = select(ctx->s + 1, NULL, &fds, NULL, &tv);
+                if (ret <= 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    return -1;
+                }
+
+                ret = -1;
+                break;
+            default:
+                return -1;
+            }
+        }
+    } while (ret <= 0);
+
+    return ret;
+}
+
+static int _modbus_tls_connect(modbus_t *ctx)
+{
+    int ret = -1;
+    fd_set fds, errfds;
+    struct timeval tv;
+    SSL *ssl = NULL;
+    modbus_tls_t *ctx_tls = (modbus_tls_t *)ctx->backend_data;
+
+    SSL_CTX_set_psk_client_callback(ctx_tls->ctx, _psk_client_cb);
+
+    ret = _modbus_tcp_pi_connect(ctx);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ssl = SSL_new(ctx_tls->ctx);
+    if (!ssl) {
+        if (ctx->debug) {
+            fprintf(stderr, "%s Error: ssl context is null\n", __func__);
+        }
+        close(ctx->s);
+        ctx->s = -1;
+        return -1;
+    }
+
+    SSL_set_fd(ssl, ctx->s);
+
+    do {
+        ret = SSL_connect(ssl);
+        if (ret <= 0) {
+            ret = SSL_get_error(ssl, ret);
+            if (ctx->debug) {
+                printf("SSL_connect [%d]\n", ret);
+            }
+
+            FD_ZERO(&fds);
+            FD_ZERO(&errfds);
+            FD_SET(ctx->s, &fds);
+            FD_SET(ctx->s, &errfds);
+            tv.tv_sec = ctx->response_timeout.tv_sec;
+            tv.tv_usec = ctx->response_timeout.tv_usec;
+
+            switch (ret) {
+            case SSL_ERROR_WANT_READ:
+                ret = select(ctx->s + 1, &fds, NULL, &errfds, &tv);
+                if (ret <= 0 || FD_ISSET(ctx->s, &errfds)) {
+                    SSL_free(ssl);
+                    close(ctx->s);
+                    ctx->s = -1;
+                    return -1;
+                }
+
+                ret = -1;
+                break;
+            case SSL_ERROR_WANT_WRITE:
+                ret = select(ctx->s + 1, NULL, &fds, &errfds, &tv);
+                if (ret <= 0 || FD_ISSET(ctx->s, &errfds)) {
+                    SSL_free(ssl);
+                    close(ctx->s);
+                    ctx->s = -1;
+                    return -1;
+                }
+
+                ret = -1;
+                break;
+            default:
+                SSL_free(ssl);
+                close(ctx->s);
+                ctx->s = -1;
+                return -1;
+            }
+        }
+    } while (ret <= 0);
+
+    if (_set_ssl_map(ctx, ssl, ctx->s) < 0) {
+        SSL_free(ssl);
+        close(ctx->s);
+        ctx->s = -1;
+        return -1;
+    }
+
+    return 0;
+}
+
+static void _modbus_tls_close(modbus_t *ctx)
+{
+    SSL *ssl = _get_ssl_map(ctx);
+    if (!ssl) {
+        if (ctx->debug) {
+            fprintf(stderr, "%s Error: ssl context is null\n", __func__);
+        }
+        return;
+    }
+
+    if (ctx->s != -1) {
+        _clear_ssl_map(ctx);
+        SSL_shutdown(ssl);
+        shutdown(ctx->s, SHUT_RDWR);
+        close(ctx->s);
+        ctx->s = -1;
+        SSL_free(ssl);
+    }
+}
+
+static int _modbus_tls_flush(modbus_t *ctx)
+{
+    int ret = -1;
+    fd_set rset;
+    struct timeval tv;
+    int ret_sum = 0;
+    char devnull[MODBUS_TCP_MAX_ADU_LENGTH];
+
+    SSL *ssl = _get_ssl_map(ctx);
+    if (!ssl) {
+        if (ctx->debug) {
+            fprintf(stderr, "%s Error: ssl context is null\n", __func__);
+        }
+        return -1;
+    }
+
+    if ((ret = SSL_pending(ssl)) > 0) {
+        ret_sum = SSL_read(ssl, devnull, ret);
+    }
+
+    do {
+        FD_ZERO(&rset);
+        FD_SET(ctx->s, &rset);
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+
+        ret = select(ctx->s + 1, &rset, NULL, NULL, &tv);
+        if (ret == 0) {
+            break;
+        } else if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        } else {
+            ret = SSL_read(ssl, devnull, MODBUS_TCP_MAX_ADU_LENGTH);
+            if (ret > 0) {
+                ret_sum += ret;
+            }
+        }
+    } while (1);
+
+    return ret_sum;
+}
+
+int modbus_tls_listen(modbus_t *ctx, int nb_connection)
+{
+    modbus_tls_t *ctx_tls = NULL;
+    int new_s = -1, flags = -1;
+
+    if (ctx == NULL) {
+        fprintf(stderr, "%s Error: modbus context is null\n", __func__);
+        errno = EINVAL;
+        return -1;
+    }
+
+    ctx_tls = (modbus_tls_t *)ctx->backend_data;
+
+    if (!SSL_CTX_set_cipher_list(ctx_tls->ctx, _MODBUS_TCP_TLS_CIPHER_LISTS)) {
+        if (ctx->debug) {
+            fprintf(stderr, "Error: set cipher list:%s failed\n", _MODBUS_TCP_TLS_CIPHER_LISTS);
+        }
+        errno = EPROTO;
+        return -1;
+    }
+
+    SSL_CTX_set_options(ctx_tls->ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
+    SSL_CTX_set_psk_server_callback(ctx_tls->ctx, _psk_server_cb);
+
+    new_s = modbus_tcp_pi_listen(ctx, nb_connection);
+    if (new_s >= 0)
+    {
+        /* set listening socket to non block */
+        if ((flags = fcntl(new_s, F_GETFL, 0)) == -1) {
+             if (ctx->debug) {
+                fprintf(stderr, "Error: fcntl: %s\n", strerror(errno));
+             }
+            close(new_s);
+            new_s = -1;
+        } else {
+            if (fcntl(new_s, F_SETFL, flags | O_NONBLOCK) == -1) {
+                if (ctx->debug) {
+                    fprintf(stderr, "Error: fcntl: %s\n", strerror(errno));
+                }
+                close(new_s);
+                new_s = -1;
+            }
+        }
+    }
+    return new_s;
+}
+
+int modbus_tls_accept(modbus_t *ctx, int *s)
+{
+    int ret = -1;
+    fd_set fds;
+    struct timeval tv;
+    SSL *ssl = NULL;
+    modbus_tls_t *ctx_tls = NULL;
+
+    if (ctx == NULL) {
+        fprintf(stderr, "%s Error: modbus context is null\n", __func__);
+        errno = EINVAL;
+        return -1;
+    }
+
+    ctx_tls = (modbus_tls_t *)ctx->backend_data;
+
+    ret = modbus_tcp_pi_accept(ctx, s);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ssl = SSL_new(ctx_tls->ctx);
+    if (!ssl) {
+        if (ctx->debug) {
+            fprintf(stderr, "%s Error: ssl context is null\n", __func__);
+        }
+        close(ctx->s);
+        ctx->s = -1;
+        return -1;
+    }
+
+    SSL_set_fd(ssl, ctx->s);
+
+    do {
+        ret = SSL_accept(ssl);
+        if (ret <= 0) {
+            ret = SSL_get_error(ssl, ret);
+            if (ctx->debug) {
+                printf("SSL_accept [%d]\n", ret);
+            }
+
+            FD_ZERO(&fds);
+            FD_SET(ctx->s, &fds);
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+
+            switch (ret) {
+            case SSL_ERROR_WANT_READ:
+                ret = select(ctx->s + 1, &fds, NULL, NULL, &tv);
+                if (ret <= 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    SSL_free(ssl);
+                    close(ctx->s);
+                    ctx->s = -1;
+                    return -1;
+                }
+
+                ret = -1;
+                break;
+            case SSL_ERROR_WANT_WRITE:
+                ret = select(ctx->s + 1, NULL, &fds, NULL, &tv);
+                if (ret <= 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    SSL_free(ssl);
+                    close(ctx->s);
+                    ctx->s = -1;
+                    return -1;
+                }
+
+                ret = -1;
+                break;
+            default:
+                SSL_free(ssl);
+                close(ctx->s);
+                ctx->s = -1;
+                return -1;
+            }
+        }
+    } while (ret <= 0);
+
+    if (_set_ssl_map(ctx, ssl, ctx->s) < 0) {
+        SSL_free(ssl);
+        close(ctx->s);
+        ctx->s = -1;
+        return -1;
+    }
+
+    return ctx->s;
+}
+
+static int _modbus_tls_select(modbus_t *ctx, fd_set *rset, struct timeval *tv, int length_to_read)
+{
+    SSL *ssl = _get_ssl_map(ctx);
+    if (!ssl) {
+        if (ctx->debug) {
+            fprintf(stderr, "%s Error: ssl context is null\n", __func__);
+        }
+        return -1;
+    }
+
+    if (SSL_pending(ssl) > 0) {
+        return 1;
+    }
+
+    return _modbus_tcp_select(ctx, rset, tv, length_to_read);
+}
+
+static void _modbus_tls_free(modbus_t *ctx)
+{
+    modbus_tls_t *ctx_tls = (modbus_tls_t *)ctx->backend_data;
+    SSL_CTX_free(ctx_tls->ctx);
+    _modbus_tcp_free(ctx);
+}
+
 const modbus_backend_t _modbus_tcp_backend = {
     _MODBUS_BACKEND_TYPE_TCP,
     _MODBUS_TCP_HEADER_LENGTH,
@@ -792,6 +1387,27 @@ const modbus_backend_t _modbus_tcp_pi_backend = {
     _modbus_tcp_flush,
     _modbus_tcp_select,
     _modbus_tcp_free};
+
+const modbus_backend_t _modbus_tls_backend = {
+    _MODBUS_BACKEND_TYPE_TCP,
+    _MODBUS_TCP_HEADER_LENGTH,
+    _MODBUS_TCP_CHECKSUM_LENGTH,
+    MODBUS_TCP_MAX_ADU_LENGTH,
+    _modbus_set_slave,
+    _modbus_tcp_build_request_basis,
+    _modbus_tcp_build_response_basis,
+    _modbus_tcp_prepare_response_tid,
+    _modbus_tcp_send_msg_pre,
+    _modbus_tls_send,
+    _modbus_tcp_receive,
+    _modbus_tls_recv,
+    _modbus_tcp_check_integrity,
+    _modbus_tcp_pre_check_confirmation,
+    _modbus_tls_connect,
+    _modbus_tls_close,
+    _modbus_tls_flush,
+    _modbus_tls_select,
+    _modbus_tls_free};
 
 modbus_t *modbus_new_tcp(const char *ip, int port)
 {
@@ -929,4 +1545,142 @@ modbus_t *modbus_new_tcp_pi(const char *node, const char *service)
     ctx_tcp_pi->t_id = 0;
 
     return ctx;
+}
+
+modbus_t *modbus_new_tls(const char *node, const char *service, const char *key, const char *identity)
+{
+    modbus_t *ctx;
+    modbus_tls_t *ctx_tls;
+    size_t dest_size;
+    size_t ret_size;
+    struct sigaction sa;
+
+    /* There is no MSG_NOSIGNAL equivalent for SSL_write, so we
+     * install the ignore handler for SIGPIPE */
+    sa.sa_handler = SIG_IGN;
+    if (sigaction(SIGPIPE, &sa, NULL) < 0) {
+        fprintf(stderr, "Error: Could not install SIGPIPE handler.\n");
+        return NULL;
+    }
+
+    if (service == NULL || key == NULL || identity == NULL ) {
+        fprintf(stderr, "Error: service, key or identity is empty\n");
+        return NULL;
+    }
+
+    ctx = (modbus_t *)malloc(sizeof(modbus_t));
+    if (ctx == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    _modbus_init_common(ctx);
+
+    /* Could be changed after to reach a remote serial Modbus device */
+    ctx->slave = MODBUS_TCP_SLAVE;
+
+    ctx->backend = &_modbus_tls_backend;
+
+    ctx->backend_data = (modbus_tls_t *)malloc(sizeof(modbus_tls_t));
+    if (ctx->backend_data == NULL) {
+        modbus_free(ctx);
+        errno = ENOMEM;
+        return NULL;
+    }
+    memset(ctx->backend_data, 0, sizeof(modbus_tls_t));
+    ctx_tls = (modbus_tls_t *)ctx->backend_data;
+
+    if (node == NULL) {
+        /* The node argument can be empty to indicate any hosts */
+        ctx_tls->node[0] = 0;
+    } else {
+        dest_size = sizeof(char) * _MODBUS_TCP_PI_NODE_LENGTH;
+        ret_size = strlcpy(ctx_tls->node, node, dest_size);
+        if (ret_size == 0) {
+            fprintf(stderr, "Error: The node string is empty\n");
+            modbus_free(ctx);
+            errno = EINVAL;
+            return NULL;
+        }
+
+        if (ret_size >= dest_size) {
+            fprintf(stderr, "Error: The node string has been truncated\n");
+            modbus_free(ctx);
+            errno = EINVAL;
+            return NULL;
+        }
+    }
+
+    if (service != NULL) {
+        dest_size = sizeof(char) * _MODBUS_TCP_PI_SERVICE_LENGTH;
+        ret_size = strlcpy(ctx_tls->service, service, dest_size);
+        if (ret_size == 0) {
+            fprintf(stderr, "Error: The service string is empty\n");
+            modbus_free(ctx);
+            errno = EINVAL;
+            return NULL;
+        }
+
+        if (ret_size >= dest_size) {
+            fprintf(stderr, "Error: The service string has been truncated\n");
+            modbus_free(ctx);
+            errno = EINVAL;
+            return NULL;
+        }
+    }
+
+    if (key != NULL) {
+        dest_size = sizeof(ctx_tls->psk);
+        ret_size = strlcpy(ctx_tls->psk, key, dest_size);
+        if (ret_size == 0) {
+            fprintf(stderr, "Error: The key string is empty\n");
+            modbus_free(ctx);
+            errno = EINVAL;
+            return NULL;
+        }
+
+        if (ret_size >= dest_size) {
+            fprintf(stderr, "Error: The key string has been truncated\n");
+            modbus_free(ctx);
+            errno = EINVAL;
+            return NULL;
+        }
+    }
+
+    if (identity != NULL) {
+        dest_size = sizeof(ctx_tls->identity);
+        ret_size = strlcpy(ctx_tls->identity, identity, dest_size);
+        if (ret_size == 0) {
+            fprintf(stderr, "Error: The identity string is empty\n");
+            modbus_free(ctx);
+            errno = EINVAL;
+            return NULL;
+        }
+
+        if (ret_size >= dest_size) {
+            fprintf(stderr, "Error: The identity string has been truncated\n");
+            modbus_free(ctx);
+            errno = EINVAL;
+            return NULL;
+        }
+    }
+
+    SSL_load_error_strings();
+    SSL_library_init();
+
+    ctx_tls->ctx = SSL_CTX_new(TLS_method());
+    if(ctx_tls->ctx) {
+        SSL_CTX_set_min_proto_version(ctx_tls->ctx, TLS1_2_VERSION);
+        SSL_CTX_set_max_proto_version(ctx_tls->ctx, TLS1_2_VERSION);
+        SSL_CTX_set_app_data(ctx_tls->ctx, ctx->backend_data);
+        SSL_CTX_clear_mode(ctx_tls->ctx, SSL_MODE_AUTO_RETRY);
+        SSL_CTX_set_options(ctx_tls->ctx, SSL_OP_NO_COMPRESSION);
+        SSL_CTX_set_verify(ctx_tls->ctx, SSL_VERIFY_NONE, NULL);
+        return ctx;
+    }
+
+    fprintf(stderr, "Error: Create SSL context failed\n");
+    ERR_print_errors_fp(stderr);
+    modbus_free(ctx);
+    errno = EPROTO;
+    return NULL;
 }

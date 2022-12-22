@@ -26,7 +26,8 @@
 enum {
     TCP,
     TCP_PI,
-    RTU
+    RTU,
+    TLS
 };
 
 int main(int argc, char *argv[])
@@ -47,8 +48,10 @@ int main(int argc, char *argv[])
             use_backend = TCP_PI;
         } else if (strcmp(argv[1], "rtu") == 0) {
             use_backend = RTU;
+        } else if (strcmp(argv[1], "tls") == 0) {
+            use_backend = TLS;
         } else {
-            printf("Usage:\n  %s [tcp|tcppi|rtu] - Modbus server for unit testing\n\n", argv[0]);
+            printf("Usage:\n  %s [tcp|tcppi|rtu|tls] - Modbus server for unit testing\n\n", argv[0]);
             return -1;
         }
     } else {
@@ -61,6 +64,9 @@ int main(int argc, char *argv[])
         query = malloc(MODBUS_TCP_MAX_ADU_LENGTH);
     } else if (use_backend == TCP_PI) {
         ctx = modbus_new_tcp_pi("::0", "1502");
+        query = malloc(MODBUS_TCP_MAX_ADU_LENGTH);
+    } else if (use_backend == TLS) {
+        ctx = modbus_new_tls("127.0.0.1", "1502", "bc097cc983de98728f5f33d38988b35c8876b3922c87201a00f1e58c4e3859a4", "modbus-tls");
         query = malloc(MODBUS_TCP_MAX_ADU_LENGTH);
     } else {
         ctx = modbus_new_rtu("/dev/ttyUSB0", 115200, 'N', 8, 1);
@@ -101,6 +107,9 @@ int main(int argc, char *argv[])
     } else if (use_backend == TCP_PI) {
         s = modbus_tcp_pi_listen(ctx, 1);
         modbus_tcp_pi_accept(ctx, &s);
+    } else if (use_backend == TLS) {
+        s = modbus_tls_listen(ctx, 1);
+        modbus_tls_accept(ctx, &s);
     } else {
         rc = modbus_connect(ctx);
         if (rc == -1) {
@@ -182,7 +191,7 @@ int main(int argc, char *argv[])
 
     printf("Quit the loop: %s\n", modbus_strerror(errno));
 
-    if (use_backend == TCP) {
+    if (use_backend == TCP || use_backend == TLS) {
         if (s != -1) {
             close(s);
         }
