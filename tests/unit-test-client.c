@@ -18,7 +18,8 @@ const int EXCEPTION_RC = 2;
 enum {
     TCP,
     TCP_PI,
-    RTU
+    RTU,
+    TLS
 };
 
 int test_server(modbus_t *ctx, int use_backend);
@@ -75,8 +76,10 @@ int main(int argc, char *argv[])
             use_backend = TCP_PI;
         } else if (strcmp(argv[1], "rtu") == 0) {
             use_backend = RTU;
+        } else if (strcmp(argv[1], "tls") == 0) {
+            use_backend = TLS;
         } else {
-            printf("Usage:\n  %s [tcp|tcppi|rtu] - Modbus client for unit testing\n\n", argv[0]);
+            printf("Usage:\n  %s [tcp|tcppi|rtu|tls] - Modbus client for unit testing\n\n", argv[0]);
             exit(1);
         }
     } else {
@@ -88,6 +91,8 @@ int main(int argc, char *argv[])
         ctx = modbus_new_tcp("127.0.0.1", 1502);
     } else if (use_backend == TCP_PI) {
         ctx = modbus_new_tcp_pi("::1", "1502");
+    } else if (use_backend == TLS) {
+        ctx = modbus_new_tls("127.0.0.1", "1502", "bc097cc983de98728f5f33d38988b35c8876b3922c87201a00f1e58c4e3859a4", "modbus-tls");
     } else {
         ctx = modbus_new_rtu("/dev/ttyUSB1", 115200, 'N', 8, 1);
     }
@@ -498,7 +503,7 @@ int main(int argc, char *argv[])
         printf("2/3 No reply after a broadcast query: ");
         ASSERT_TRUE(rc == -1 && errno == ETIMEDOUT, "");
     } else {
-        /* Response in TCP mode */
+        /* Response in TCP/TLS mode */
         printf("1/3 Response from slave %d: ", INVALID_SERVER_ID);
         ASSERT_TRUE(rc == UT_REGISTERS_NB, "");
 

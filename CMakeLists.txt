@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.0)
+
+find_package(PkgConfig REQUIRED)
+find_package(OpenSSL REQUIRED)
+
 project(libmodbus VERSION 3.1.6)
 
 #### CONFIGURATION ####
@@ -72,6 +76,7 @@ target_include_directories(modbus INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/modbus>
 )
+target_link_libraries(modbus ssl crypto)
 set_target_properties(modbus PROPERTIES PUBLIC_HEADER "${MODBUS_PUBLIC_HEADERS}")
 
 if(CMAKE_COMPILER_IS_GNUCC)
