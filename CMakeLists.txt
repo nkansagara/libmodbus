@@ -76,7 +76,10 @@ target_include_directories(modbus INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/modbus>
 )
-target_link_libraries(modbus ssl crypto)
+target_include_directories(modbus BEFORE PRIVATE ${OPENSSL_INCLUDE_DIR})
+find_library(SSL_LIBRARY ssl HINTS ${OPENSSL_LIB_DIR})
+find_library(CRYPTO_LIBRARY crypto HINTS ${OPENSSL_LIB_DIR})
+target_link_libraries(modbus ${SSL_LIBRARY} ${CRYPTO_LIBRARY})
 set_target_properties(modbus PROPERTIES PUBLIC_HEADER "${MODBUS_PUBLIC_HEADERS}")
 
 if(CMAKE_COMPILER_IS_GNUCC)
